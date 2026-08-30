@@ -3,6 +3,8 @@ use std::fs;
 use std::process::{Command, Stdio, Child};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use glob::glob;
+use shellexpand;
 use serde::Deserialize;
 
 use rustyline::error::ReadlineError;
@@ -41,12 +43,11 @@ impl ShellState {
     }
 
     fn clean_jobs(&mut self) {
-        // Verwijder jobs die inmiddels klaar zijn
         self.background_jobs.retain_mut(|(child, _)| {
             match child.try_wait() {
-                Ok(Some(_status)) => false, // Klaar, dus verwijder uit lijst
-                Ok(None) => true,           // Nog bezig, bewaar
-                Err(_) => false,            // Error, gooi weg
+                Ok(Some(_status)) => false, 
+                Ok(None) => true,           
+                Err(_) => false,            
             }
         });
     }
@@ -62,8 +63,36 @@ impl ShellState {
         }
     }
 
+    fn expand_args(raw_args: Vec<String>) -> Vec<String> {
+        let mut expanded = Vec::new();
+        for arg in raw_args {
+            // 1. Tilde & Env vars expansie (~/pad -> /home/rene/pad)
+            let tilde_expanded = shellexpand::tilde(&arg).to_string();
+            
+            // 2. Globbing (*.rs -> main.rs test.rs)
+            // Alleen proberen te globben als er wildcard chars in zitten
+            if tilde_expanded.contains('*') || tilde_expanded.contains('?') {
+                if let Ok(paths) = glob(&tilde_expanded) {
+                    let mut matched_any = false;
+                    for path in paths.flatten() {
+                        expanded.push(path.to_string_lossy().into_owned());
+                        matched_any = true;
+                    }
+                    if !matched_any {
+                        expanded.push(tilde_expanded);
+                    }
+                } else {
+                    expanded.push(tilde_expanded);
+                }
+            } else {
+                expanded.push(tilde_expanded);
+            }
+        }
+        expanded
+    }
+
     fn execute_command(&mut self, input: &str) {
-        self.clean_jobs(); // Ruim afgeronde achtergrondtaken op
+        self.clean_jobs(); 
         
         let mut is_background = false;
         let mut cmd_str = input.trim().to_string();
@@ -74,31 +103,32 @@ impl ShellState {
             cmd_str = cmd_str.trim().to_string();
         }
 
-        // Resolveer aliases voor het eerste commando in de pipeline
-        // Opmerking: In een volledige iteratie zouden we aliases per pipe-part oplossen.
         let pipe_parts: Vec<&str> = cmd_str.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
         if pipe_parts.is_empty() { return; }
 
         let mut previous_command: Option<Child> = None;
         let cmd_count = pipe_parts.len();
-        
-        let original_command_string = cmd_str.clone(); // Voor job lijst
+        let original_command_string = cmd_str.clone(); 
 
         for (i, part) in pipe_parts.iter().enumerate() {
-            let mut args: Vec<String> = part.split_whitespace().map(|s| s.to_string()).collect();
-            if args.is_empty() { continue; }
+            let raw_args: Vec<String> = part.split_whitespace().map(|s| s.to_string()).collect();
+            if raw_args.is_empty() { continue; }
             
-            // Check alias alleen voor het commando zelf
+            let mut args = raw_args;
             if let Some(alias_val) = self.config.aliases.get(&args[0]) {
                 let mut alias_args: Vec<String> = alias_val.split_whitespace().map(|s| s.to_string()).collect();
                 alias_args.extend(args.into_iter().skip(1));
                 args = alias_args;
             }
 
-            let cmd = args[0].clone();
+            // Tilde & Glob expansie
+            let mut final_args = Self::expand_args(args);
             
+            if final_args.is_empty() { continue; }
+            let cmd = final_args.remove(0);
+
             if cmd == "cd" {
-                let new_dir = if args.len() > 1 { &args[1] } else { "/" };
+                let new_dir = if final_args.len() > 0 { &final_args[0] } else { "/" };
                 let root = std::path::Path::new(new_dir);
                 if let Err(e) = env::set_current_dir(&root) {
                     eprintln!("cd fout: {}", e);
@@ -114,8 +144,8 @@ impl ShellState {
             }
 
             let mut command = Command::new(&cmd);
-            if args.len() > 1 {
-                command.args(&args[1..]);
+            if !final_args.is_empty() {
+                command.args(&final_args);
             }
 
             if let Some(mut prev) = previous_command {
@@ -152,7 +182,6 @@ impl ShellState {
 }
 
 // ---------------- Rustyline Configuratie ----------------
-
 #[derive(Helper)]
 struct OmniHelper {
     completer: FilenameCompleter,
@@ -176,11 +205,11 @@ impl Hinter for OmniHelper {
 
 impl Highlighter for OmniHelper {
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&'s self, prompt: &'p str, _default: bool) -> Cow<'b, str> {
-        Cow::Owned(format!("\x1b[1;32m{}\x1b[0m", prompt))
+        Cow::Owned(format!("\x1b[1;32m{}\x1b[0m", prompt)) // Groen
     }
 
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Owned(format!("\x1b[90m{}\x1b[0m", hint))
+        Cow::Owned(format!("\x1b[90m{}\x1b[0m", hint)) // Grijs
     }
 
     fn highlight<'l>(&self, line: &'l str, pos: usize) -> Cow<'l, str> {
@@ -195,7 +224,6 @@ impl Highlighter for OmniHelper {
 impl Validator for OmniHelper {}
 
 fn main() -> rustyline::Result<()> {
-    // Schrijf een default configuratie als die niet bestaat
     if !std::path::Path::new("omni.toml").exists() {
         let default_toml = "[aliases]\nll = \"ls -la\"\nupdate = \"sudo pacman -Syu\"\n";
         fs::write("omni.toml", default_toml).unwrap();
@@ -216,35 +244,23 @@ fn main() -> rustyline::Result<()> {
     let mut rl = Editor::<OmniHelper, rustyline::history::DefaultHistory>::with_config(config)?;
     rl.set_helper(Some(h));
 
-    if rl.load_history("history.txt").is_err() {
-        // Geen history gevonden
-    }
+    let _ = rl.load_history("history.txt");
 
     loop {
         let readline = rl.readline("omni> ");
         match readline {
             Ok(line) => {
                 let input = line.trim();
-                if input.is_empty() {
-                    continue;
-                }
-                
+                if input.is_empty() { continue; }
                 let _ = rl.add_history_entry(input);
                 state.execute_command(input);
             },
-            Err(ReadlineError::Interrupted) => {
-                println!("^C");
-            },
-            Err(ReadlineError::Eof) => {
-                break;
-            },
-            Err(err) => {
-                println!("Error: {:?}", err);
-                break;
-            }
+            Err(ReadlineError::Interrupted) => { println!("^C"); },
+            Err(ReadlineError::Eof) => { break; },
+            Err(err) => { println!("Error: {:?}", err); break; }
         }
     }
     
-    rl.save_history("history.txt")?;
+    let _ = rl.save_history("history.txt");
     Ok(())
 }
