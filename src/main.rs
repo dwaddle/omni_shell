@@ -42,7 +42,7 @@ fn main() -> rustyline::Result<()> {
                         }
                     }
                     _ => {
-                        let mut child = Command::new(command).args(args).spawn();
+                        let child = Command::new(command).args(args).spawn();
 
                         match child {
                             Ok(mut child) => {
