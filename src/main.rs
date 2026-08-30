@@ -10,7 +10,7 @@ use shellexpand;
 use serde::Deserialize;
 
 use rustyline::error::ReadlineError;
-use rustyline::{Config, EditMode, Editor, Context};
+use rustyline::{Cmd, KeyEvent, KeyCode, Modifiers, Config, EditMode, Editor, Context};
 use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::highlight::{Highlighter, MatchingBracketHighlighter, CmdKind};
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -274,6 +274,7 @@ fn main() -> rustyline::Result<()> {
     };
     let mut rl = Editor::<OmniHelper, rustyline::history::DefaultHistory>::with_config(config)?;
     rl.set_helper(Some(h));
+    rl.bind_sequence(KeyEvent::ctrl('r'), Cmd::ReverseSearchHistory);
     
     let history_path = get_history_path();
     let _ = rl.load_history(&history_path);
