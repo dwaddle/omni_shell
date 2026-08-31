@@ -120,8 +120,9 @@ impl ShellState {
 
             // BUILT-INS
             if cmd == "cd" {
-                let new_dir = if clean_args.len() > 0 { &clean_args[0] } else { "/" };
-                let root = std::path::Path::new(new_dir);
+                let default_home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+                let new_dir = if clean_args.len() > 0 { clean_args[0].clone() } else { default_home };
+                let root = std::path::Path::new(&new_dir);
                 if let Err(e) = env::set_current_dir(&root) { 
                     eprintln!("cd fout: {}", e); 
                     builtin_success = false;
@@ -130,6 +131,41 @@ impl ShellState {
                 }
                 continue;
             }
+            if cmd == "z" || cmd == "zi" {
+                if clean_args.is_empty() {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+                    let _ = env::set_current_dir(std::path::Path::new(&home));
+                    builtin_success = true;
+                    continue;
+                }
+                
+                let output = std::process::Command::new("zoxide")
+                    .arg("query")
+                    .args(&clean_args)
+                    .output();
+                    
+                if let Ok(out) = output {
+                    if out.status.success() {
+                        let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if let Err(e) = env::set_current_dir(std::path::Path::new(&path_str)) {
+                            eprintln!("z fout: {}", e);
+                            builtin_success = false;
+                        } else {
+                            builtin_success = true;
+                            // Add to zoxide db
+                            let _ = std::process::Command::new("zoxide").arg("add").arg(&path_str).status();
+                        }
+                    } else {
+                        eprintln!("z: map niet gevonden");
+                        builtin_success = false;
+                    }
+                } else {
+                    eprintln!("zoxide niet gevonden of kon niet worden uitgevoerd");
+                    builtin_success = false;
+                }
+                continue;
+            }
+
             if cmd == "jobs" {
                 self.show_jobs();
                 builtin_success = true;

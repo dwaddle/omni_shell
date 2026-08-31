@@ -1,0 +1,5 @@
+[aliases]
+ls = "eza --icons=always --color=always"
+ll = "eza -la --icons=always --color=always"
+la = "eza -a --icons=always --color=always"
+update = "sudo pacman -Syu"
